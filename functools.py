@@ -1,3 +1,139 @@
+def singledispatch(func):
+    """Single-dispatch generic function decorator.
+
+    Transforms a function into a generic function, which can have different
+    behaviours depending upon the type of its first argument. The decorated
+    function acts as the default implementation, and additional
+    implementations can be registered using the register() attribute of the
+    generic function.
+    """
+    # There are many programs that use functools without singledispatch, so we
+    # trade-off making singledispatch marginally slower for the benefit of
+    # making start-up of such applications slightly faster.
+    import types, weakref
+
+    registry = {}
+    dispatch_cache = weakref.WeakKeyDictionary()
+    cache_token = None
+
+    def dispatch(cls_obj):
+        """generic_func.dispatch(cls) -> <function implementation>
+
+        Runs the dispatch algorithm to return the best available implementation
+        for the given *cls* registered on *generic_func*.
+
+        """
+
+        cls = cls_obj.__class__
+        nonlocal cache_token
+        if cache_token is not None:
+            current_token = get_cache_token()
+            if cache_token != current_token:
+                dispatch_cache.clear()
+                cache_token = current_token
+        try:
+            impl = dispatch_cache[cls]
+        except KeyError:
+            impl = _find_impl(cls_obj, registry)
+            dispatch_cache[cls] = impl
+        return impl
+
+    def _is_union_type(cls):
+        from typing import get_origin, Union
+        return get_origin(cls) in {Union, types.UnionType}
+
+    def _is_generic_alias(cls):
+        from typing import GenericAlias
+        return isinstance(cls, GenericAlias)
+
+    def _is_valid_dispatch_type(cls):
+        if isinstance(cls, type):
+            return True
+        from typing import get_args
+        return ((_is_union_type(cls) or _is_generic_alias(cls)) and
+            all((isinstance(arg, type) or _is_union_type(arg)) for arg in get_args(cls)))
+
+    def register(cls, func=None):
+        """generic_func.register(cls, func) -> func
+
+        Registers a new implementation for the given *cls* on a *generic_func*.
+
+        """
+        nonlocal cache_token
+        if _is_valid_dispatch_type(cls):
+            if func is None:
+                return lambda f: register(cls, f)
+        else:
+            if func is not None:
+                raise TypeError(
+                    f"Invalid first argument to `register()`. "
+                    f"{cls!r} is not a class or union type."
+                )
+            ann = getattr(cls, '__annotations__', {})
+            if not ann:
+                raise TypeError(
+                    f"Invalid first argument to `register()`: {cls!r}. "
+                    f"Use either `@register(some_class)` or plain `@register` "
+                    f"on an annotated function."
+                )
+            func = cls
+
+            # only import typing if annotation parsing is necessary
+            from typing import get_type_hints
+            argname, cls = next(iter(get_type_hints(func).items()))
+            if not _is_valid_dispatch_type(cls):
+                if _is_union_type(cls) or _is_generic_alias(cls):
+                    raise TypeError(
+                        f"Invalid annotation for {argname!r}. "
+                        f"{cls!r} not all arguments are classes."
+                    )
+                else:
+                    raise TypeError(
+                        f"Invalid annotation for {argname!r}. "
+                        f"{cls!r} is not a class."
+                    )
+
+        if _is_union_type(cls):
+            from typing import get_args
+
+            for arg in get_args(cls):
+                registry[arg] = func
+
+        elif _is_generic_alias(cls):
+            registry[cls] = func
+
+        else:
+            registry[cls] = func
+
+        if cache_token is None and hasattr(cls, '__abstractmethods__'):
+            cache_token = get_cache_token()
+        dispatch_cache.clear()
+        return func
+
+    def wrapper(*args, **kw):
+        if not args:
+            raise TypeError(f'{funcname} requires at least '
+                            '1 positional argument')
+
+        return dispatch(args[0])(*args, **kw)
+
+    funcname = getattr(func, '__name__', 'singledispatch function')
+    registry[object] = func
+    wrapper.register = register
+    wrapper.dispatch = dispatch
+    wrapper.registry = types.MappingProxyType(registry)
+    wrapper._clear_cache = dispatch_cache.clear
+    update_wrapper(wrapper, func)
+    return wrapper
+
+
+from abc import get_cache_token
+from collections import namedtuple
+# import types, weakref  # Deferred to single_dispatch()
+from reprlib import recursive_repr
+from _thread import RLock
+from types import GenericAlias
+
 ################################################################################
 ### singledispatch() - single-dispatch generic function decorator
 ################################################################################
@@ -116,7 +252,7 @@ def _compose_mro(cls, types):
                     mro.append(subcls)
     return _c3_mro(cls, abcs=mro)
 
-def _find_impl(cls, registry):
+def _find_impl(cls_obj, registry):
     """Returns the best matching implementation from *registry* for type *cls*.
 
     Where there is no registered implementation for a specific type, its method
@@ -126,176 +262,42 @@ def _find_impl(cls, registry):
     *object* type, this function may return None.
 
     """
+    cls = cls_obj.__class__
     mro = _compose_mro(cls, registry.keys())
     match = None
-    for t in mro:
-        if match is not None:
-            # If *match* is an implicit ABC but there is another unrelated,
-            # equally matching implicit ABC, refuse the temptation to guess.
-            if (t in registry and t not in cls.__mro__
-                              and match not in cls.__mro__
-                              and not issubclass(match, t)):
+
+    from typing import get_origin, get_args
+    # check containers that match cls first
+    for t in [i for i in registry.keys() if get_origin(i) == cls]:
+        if not all([isinstance(i, get_args(t)) for i in cls_obj]):
+            continue
+
+        if match is None:
+            match = t
+
+        else:
+            match_args = get_args(get_args(match)[0])
+            t_args = get_args(get_args(t)[0])
+            if len(match_args) == len(t_args):
+                breakpoint()
                 raise RuntimeError("Ambiguous dispatch: {} or {}".format(
                     match, t))
-            break
-        if t in registry:
-            match = t
+
+            elif len(t_args)<len(match_args):
+                match = t
+
+    if not match:
+        for t in mro:
+            if match is not None:
+                # If *match* is an implicit ABC but there is another unrelated,
+                # equally matching implicit ABC, refuse the temptation to guess.
+                if (t in registry and t not in cls.__mro__
+                                  and match not in cls.__mro__
+                                  and not issubclass(match, t)):
+                    raise RuntimeError("Ambiguous dispatch: {} or {}".format(
+                        match, t))
+                break
+            if t in registry:
+                match = t
+
     return registry.get(match)
-
-def singledispatch(func):
-    """Single-dispatch generic function decorator.
-
-    Transforms a function into a generic function, which can have different
-    behaviours depending upon the type of its first argument. The decorated
-    function acts as the default implementation, and additional
-    implementations can be registered using the register() attribute of the
-    generic function.
-    """
-    # There are many programs that use functools without singledispatch, so we
-    # trade-off making singledispatch marginally slower for the benefit of
-    # making start-up of such applications slightly faster.
-    import types, weakref
-
-    registry = {}
-    dispatch_cache = weakref.WeakKeyDictionary()
-    cache_token = None
-
-    def dispatch(cls):
-        """generic_func.dispatch(cls) -> <function implementation>
-
-        Runs the dispatch algorithm to return the best available implementation
-        for the given *cls* registered on *generic_func*.
-
-        """
-        nonlocal cache_token
-        if cache_token is not None:
-            current_token = get_cache_token()
-            if cache_token != current_token:
-                dispatch_cache.clear()
-                cache_token = current_token
-        try:
-            impl = dispatch_cache[cls]
-        except KeyError:
-            try:
-                impl = registry[cls]
-            except KeyError:
-                impl = _find_impl(cls, registry)
-            dispatch_cache[cls] = impl
-        return impl
-
-    def _is_union_type(cls):
-        from typing import get_origin, Union
-        return get_origin(cls) in {Union, types.UnionType}
-
-    def _is_valid_dispatch_type(cls):
-        if isinstance(cls, type):
-            return True
-        from typing import get_args
-        return (_is_union_type(cls) and
-                all(isinstance(arg, type) for arg in get_args(cls)))
-
-    def register(cls, func=None):
-        """generic_func.register(cls, func) -> func
-
-        Registers a new implementation for the given *cls* on a *generic_func*.
-
-        """
-        nonlocal cache_token
-        if _is_valid_dispatch_type(cls):
-            if func is None:
-                return lambda f: register(cls, f)
-        else:
-            if func is not None:
-                raise TypeError(
-                    f"Invalid first argument to `register()`. "
-                    f"{cls!r} is not a class or union type."
-                )
-            ann = getattr(cls, '__annotations__', {})
-            if not ann:
-                raise TypeError(
-                    f"Invalid first argument to `register()`: {cls!r}. "
-                    f"Use either `@register(some_class)` or plain `@register` "
-                    f"on an annotated function."
-                )
-            func = cls
-
-            # only import typing if annotation parsing is necessary
-            from typing import get_type_hints
-            argname, cls = next(iter(get_type_hints(func).items()))
-            if not _is_valid_dispatch_type(cls):
-                if _is_union_type(cls):
-                    raise TypeError(
-                        f"Invalid annotation for {argname!r}. "
-                        f"{cls!r} not all arguments are classes."
-                    )
-                else:
-                    raise TypeError(
-                        f"Invalid annotation for {argname!r}. "
-                        f"{cls!r} is not a class."
-                    )
-
-        if _is_union_type(cls):
-            from typing import get_args
-
-            for arg in get_args(cls):
-                registry[arg] = func
-        else:
-            registry[cls] = func
-        if cache_token is None and hasattr(cls, '__abstractmethods__'):
-            cache_token = get_cache_token()
-        dispatch_cache.clear()
-        return func
-
-    def wrapper(*args, **kw):
-        if not args:
-            raise TypeError(f'{funcname} requires at least '
-                            '1 positional argument')
-
-        return dispatch(args[0].__class__)(*args, **kw)
-
-    funcname = getattr(func, '__name__', 'singledispatch function')
-    registry[object] = func
-    wrapper.register = register
-    wrapper.dispatch = dispatch
-    wrapper.registry = types.MappingProxyType(registry)
-    wrapper._clear_cache = dispatch_cache.clear
-    update_wrapper(wrapper, func)
-    return wrapper
-
-
-# Descriptor version
-class singledispatchmethod:
-    """Single-dispatch generic method descriptor.
-
-    Supports wrapping existing descriptors and handles non-descriptor
-    callables as instance methods.
-    """
-
-    def __init__(self, func):
-        if not callable(func) and not hasattr(func, "__get__"):
-            raise TypeError(f"{func!r} is not callable or a descriptor")
-
-        self.dispatcher = singledispatch(func)
-        self.func = func
-
-    def register(self, cls, method=None):
-        """generic_method.register(cls, func) -> func
-
-        Registers a new implementation for the given *cls* on a *generic_method*.
-        """
-        return self.dispatcher.register(cls, func=method)
-
-    def __get__(self, obj, cls=None):
-        def _method(*args, **kwargs):
-            method = self.dispatcher.dispatch(args[0].__class__)
-            return method.__get__(obj, cls)(*args, **kwargs)
-
-        _method.__isabstractmethod__ = self.__isabstractmethod__
-        _method.register = self.register
-        update_wrapper(_method, self.func)
-        return _method
-
-    @property
-    def __isabstractmethod__(self):
-        return getattr(self.func, '__isabstractmethod__', False)
-
