@@ -1,3 +1,5 @@
+from functools import update_wrapper
+
 def singledispatch(func):
     """Single-dispatch generic function decorator.
 
@@ -35,7 +37,7 @@ def singledispatch(func):
             impl = dispatch_cache[cls]
         except KeyError:
             impl = _find_impl(cls_obj, registry)
-            dispatch_cache[cls] = impl
+            #dispatch_cache[cls] = impl
         return impl
 
     def _is_union_type(cls):
@@ -266,25 +268,28 @@ def _find_impl(cls_obj, registry):
     mro = _compose_mro(cls, registry.keys())
     match = None
 
+
     from typing import get_origin, get_args
-    # check containers that match cls first
-    for t in [i for i in registry.keys() if get_origin(i) == cls]:
-        if not all([isinstance(i, get_args(t)) for i in cls_obj]):
-            continue
+    #print(cls_obj, cls, get_origin(cls_obj), get_args(cls_obj))
+    #print([i for i in registry.keys() if get_origin(i) == cls])
 
-        if match is None:
-            match = t
+    if len(cls_obj) > 0: # dont try to match the types of empty containers
+        # check containers that match cls first
+        for t in [i for i in registry.keys() if get_origin(i) == cls]:
+            if not all([isinstance(i, get_args(t)) for i in cls_obj]):
+                continue
 
-        else:
-            match_args = get_args(get_args(match)[0])
-            t_args = get_args(get_args(t)[0])
-            if len(match_args) == len(t_args):
-                breakpoint()
-                raise RuntimeError("Ambiguous dispatch: {} or {}".format(
-                    match, t))
-
-            elif len(t_args)<len(match_args):
+            if match is None:
                 match = t
+
+            else:
+                match_args = get_args(get_args(match)[0])
+                t_args = get_args(get_args(t)[0])
+                if len(match_args) == len(t_args):
+                    raise RuntimeError("Ambiguous dispatch: {} or {}".format( match, t))
+
+                elif len(t_args)<len(match_args):
+                    match = t
 
     if not match:
         for t in mro:
@@ -300,4 +305,38 @@ def _find_impl(cls_obj, registry):
             if t in registry:
                 match = t
 
+
     return registry.get(match)
+
+
+if __name__ == "__main__":
+
+    @singledispatch
+    def generate(x: any):
+        return "any :("
+
+    @generate.register
+    def _(x: list):
+        #raise TypeError("basic list -- FAIL!")
+        return f"basic list: {x}"
+
+    @generate.register
+    def _(x: list[int]):
+        return f"ints: {x}"
+
+    @generate.register
+    def _(x: list[str]):
+        return f"strs: {x}"
+
+    @generate.register
+    def _(x: list[int|str]):
+        return f"int|str: {x}"
+
+    print(generate([]))
+    print(generate(["hello", "goodbye"]))
+    print(generate([1]))
+    print(generate([1,2]))
+    print(generate(["hello"]))
+    print(generate(["mixed", 69, "numbers", 420]))
+    print(generate(["with", 12.3, "floats"]))
+    print(generate([1243.12]))
