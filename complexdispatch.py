@@ -1,6 +1,15 @@
+# Python module wrapper for _functools C module
+# to allow utilities written in Python to be added
+# to the functools module.
+# Written by Nick Coghlan <ncoghlan at gmail.com>,
+# Raymond Hettinger <python at rcn.com>,
+# and Łukasz Langa <lukasz at langa.pl>.
+#   Copyright (C) 2006 Python Software Foundation.
+# See C source code for _functools credits/copyright
+
 from functools import update_wrapper
 
-def singledispatch(func):
+def complexdispatch(func):
     """Single-dispatch generic function decorator.
 
     Transforms a function into a generic function, which can have different
@@ -9,8 +18,8 @@ def singledispatch(func):
     implementations can be registered using the register() attribute of the
     generic function.
     """
-    # There are many programs that use functools without singledispatch, so we
-    # trade-off making singledispatch marginally slower for the benefit of
+    # There are many programs that use functools without complexdispatch, so we
+    # trade-off making complexdispatch marginally slower for the benefit of
     # making start-up of such applications slightly faster.
     import types, weakref
 
@@ -119,7 +128,7 @@ def singledispatch(func):
 
         return dispatch(args[0])(*args, **kw)
 
-    funcname = getattr(func, '__name__', 'singledispatch function')
+    funcname = getattr(func, '__name__', 'complexdispatch function')
     registry[object] = func
     wrapper.register = register
     wrapper.dispatch = dispatch
@@ -137,7 +146,7 @@ from _thread import RLock
 from types import GenericAlias
 
 ################################################################################
-### singledispatch() - single-dispatch generic function decorator
+### complexdispatch() - single-dispatch generic function decorator
 ################################################################################
 
 def _c3_merge(sequences):
@@ -311,7 +320,7 @@ def _find_impl(cls_obj, registry):
 
 if __name__ == "__main__":
 
-    @singledispatch
+    @complexdispatch
     def generate(x: any):
         return "any :("
 
@@ -332,6 +341,10 @@ if __name__ == "__main__":
     def _(x: list[int|str]):
         return f"int|str: {x}"
 
+    @generate.register
+    def _(x: list[float|int]):
+        return f"float|int: {x}"
+
     print(generate([]))
     print(generate(["hello", "goodbye"]))
     print(generate([1]))
@@ -340,3 +353,5 @@ if __name__ == "__main__":
     print(generate(["mixed", 69, "numbers", 420]))
     print(generate(["with", 12.3, "floats"]))
     print(generate([1243.12]))
+    print(generate([1243.12, 23223.0]))
+    print(generate([1243.12, 23223]))
