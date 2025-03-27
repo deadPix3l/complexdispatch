@@ -8,7 +8,7 @@ singledispatch cannot handle PEP-585 types: `def _(x: list[ str | int ])`
 This seemed like a no brainer, but its been brought up and rejected more than once.
 The supposed "solution" is to just do some good old if-routing:
 
-```
+```python
 @dispatch.register
 def _list_handler(x: list): # i'd love to get more specific, but I cant!
     if all(isinstance(i, str) for i in x):
@@ -19,7 +19,10 @@ def _list_handler(x: list): # i'd love to get more specific, but I cant!
 
     ...
 
-    # The logic for `str | int` gets kind of messy here...
+    if all(isinstance(i, (str, int)) for i in x):
+        # mixed string and int
+
+    # god forbid we add another, shoot me...
 ```
 
 Theres nothing inherently wrong with this code,
